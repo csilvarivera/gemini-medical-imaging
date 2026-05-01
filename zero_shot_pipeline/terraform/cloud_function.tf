@@ -55,6 +55,7 @@ resource "google_cloudfunctions2_function" "trigger_wsi_pipeline" {
 
   depends_on = [
     google_project_iam_member.sa_eventarc_receiver,
-    google_project_iam_member.sa_run_invoker
+    google_project_iam_member.sa_run_invoker,
+    google_project_iam_member.gcs_pubsub_publisher
   ]
 }

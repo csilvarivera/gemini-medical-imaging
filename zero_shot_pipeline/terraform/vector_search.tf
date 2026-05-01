@@ -40,7 +40,7 @@ resource "google_vertex_ai_index_endpoint_deployed_index" "histology_deployed_in
   
   dedicated_resources {
     machine_spec {
-      machine_type = "e2-standard-2"
+      machine_type = "e2-standard-16"
     }
     min_replica_count = 1
     max_replica_count = 1
