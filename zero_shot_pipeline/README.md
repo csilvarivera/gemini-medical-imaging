@@ -41,7 +41,7 @@ Follow these steps in order to deploy the pipeline from scratch.
 * You must have the `gcloud` CLI installed and authenticated.
 * You must have `terraform` installed.
 * You must have Docker installed.
-* Ensure you are operating within your target GCP Project (default: `gsk-cmc-hackathon`).
+* Ensure you are operating within your target GCP Project (e.g. `<YOUR_PROJECT_ID>`).
 
 ### Step 1: Deploy Infrastructure (Terraform)
 This step provisions the buckets, databases, vector search endpoints, and service accounts.
@@ -68,7 +68,7 @@ Kubeflow requires a base image to execute the Python components. We use Artifact
 cd ../docker
 
 # Replace with your actual Artifact Registry path!
-export IMAGE_URI="us-central1-docker.pkg.dev/gsk-cmc-hackathon/your-repo/kfp-base:latest"
+export IMAGE_URI="us-central1-docker.pkg.dev/<YOUR_PROJECT_ID>/<YOUR_REPO>/kfp-base:latest"
 
 # Build the image locally
 docker build -t $IMAGE_URI .
@@ -106,8 +106,8 @@ gcloud functions deploy trigger-wsi-pipeline \
     --source=. \
     --entry-point=trigger_pipeline \
     --trigger-event-filters="type=google.cloud.storage.object.v1.finalized" \
-    --trigger-event-filters="bucket=gsk-cmc-hackathon-wsi-data" \
-    --service-account="wsi-pipeline-sa@gsk-cmc-hackathon.iam.gserviceaccount.com"
+    --trigger-event-filters="bucket=<YOUR_WSI_BUCKET_NAME>" \
+    --service-account="<YOUR_SERVICE_ACCOUNT_EMAIL>"
 ```
 
 ---
@@ -126,10 +126,10 @@ Upload both files to the `inputs/` directory of your provisioned bucket.
 
 ```bash
 # Upload the WSI
-gsutil cp sample_123.svs gs://gsk-cmc-hackathon-wsi-data/inputs/
+gsutil cp sample_123.svs gs://<YOUR_WSI_BUCKET_NAME>/inputs/
 
 # Upload the Metadata
-gsutil cp sample_123_metadata.json gs://gsk-cmc-hackathon-wsi-data/inputs/
+gsutil cp sample_123_metadata.json gs://<YOUR_WSI_BUCKET_NAME>/inputs/
 ```
 
 ### 3. Monitor the Execution
@@ -143,6 +143,6 @@ gsutil cp sample_123_metadata.json gs://gsk-cmc-hackathon-wsi-data/inputs/
 
 ### 4. Verify the Outputs
 Once the pipeline finishes, check your outputs:
-* **Storage**: `gs://gsk-cmc-hackathon-wsi-data/outputs/<run_id>/` (Contains your masks and the generated `.docx` report).
+* **Storage**: `gs://<YOUR_WSI_BUCKET_NAME>/outputs/<run_id>/` (Contains your masks and the generated `.docx` report).
 * **BigQuery**: Check the `pathology_db.tile_metadata` table for the newly inserted row logs.
 * **Vector Search**: The embeddings for the tiles are now searchable in your Vertex AI Index.

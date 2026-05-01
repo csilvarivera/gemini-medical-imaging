@@ -38,7 +38,7 @@ The application provides a modular interface consisting of:
 
 ## 2. Infrastructure Architecture
 
-The Terraform configurations (`terraform/`) deploy your infrastructure to the target Google Cloud project (`gsk-cmc-hackathon` by default).
+The Terraform configurations (`terraform/`) deploy your infrastructure to the target Google Cloud project (e.g. `<YOUR_PROJECT_ID>`).
 
 **Resources Managed:**
 - **GCS Buckets**: For `wsi-images` (input), `masks` (outputs), and `reports` (Word doc generation).
@@ -85,14 +85,14 @@ Once the Terraform infrastructure is provisioned, you can build and deploy the c
 1. **Build and push the Docker image** (using Google Cloud Build or local Docker):
    ```bash
    cd app
-   gcloud builds submit --tag us-central1-docker.pkg.dev/gsk-cmc-hackathon/med-imaging-pov-repo/app:latest
+   gcloud builds submit --tag us-central1-docker.pkg.dev/<YOUR_PROJECT_ID>/med-imaging-pov-repo/app:latest
    ```
 2. **Deploy to Cloud Run**:
    ```bash
    gcloud run deploy med-imaging-pov-service \
-       --image us-central1-docker.pkg.dev/gsk-cmc-hackathon/med-imaging-pov-repo/app:latest \
+       --image us-central1-docker.pkg.dev/<YOUR_PROJECT_ID>/med-imaging-pov-repo/app:latest \
        --region us-central1 \
-       --project gsk-cmc-hackathon
+       --project <YOUR_PROJECT_ID>
    ```
 
 ## 5. Next Steps
