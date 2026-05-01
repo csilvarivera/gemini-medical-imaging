@@ -8,6 +8,24 @@ The pipeline automatically triggers when a pathology Whole Slide Image (`.svs`) 
 
 ## 🏗 Architecture Overview
 
+```mermaid
+graph TD
+    User([Scanner / User]) -->|Uploads WSI & JSON| GCS[Google Cloud Storage]
+    GCS -->|Eventarc Trigger| CF[Cloud Function]
+    CF -->|Submits Job| KFP[Vertex AI Pipeline]
+    
+    subgraph Vertex AI Pipeline
+        KFP_Ext[1. Extract Metadata] -->|MedGemma Prompting| KFP_Proc[2. Process WSI]
+        KFP_Proc -->|Tile Extraction & Embedding| PF[PathFoundation Model]
+        KFP_Proc -->|Mask Generation| MS[MedSigLip Model]
+        KFP_Proc -->|Save Tiles & Masks| GCS_Out[GCS Outputs]
+        KFP_Proc -->|Index Embeddings| VS[Vertex Vector Search]
+        KFP_Proc -->|Log Metadata| BQ[(BigQuery)]
+        KFP_Proc --> KFP_Rep[3. Generate Report]
+        KFP_Rep -->|Uploads Word Doc| GCS_Out
+    end
+```
+
 1. **`terraform/`**: Infrastructure-as-Code to provision GCS buckets, BigQuery tables, Vertex AI Vector Search endpoints, Service Accounts, and Eventarc triggers.
 2. **`docker/`**: A custom Kubeflow (KFP) container environment that pre-installs complex C-libraries like `openslide-tools` alongside Python dependencies.
 3. **`pipeline/`**: Modularized Vertex AI Pipeline components (`components.py`) and a compilation script (`compile_pipeline.py`) that generates the execution graph.

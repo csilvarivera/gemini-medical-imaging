@@ -4,6 +4,26 @@ The Proof of Value (PoV) for the Medical Imaging Path Foundation Model provides 
 
 This repository contains both the Infrastructure-as-Code (Terraform) to run it securely on GCP and the Python Streamlit Application for the UI and processing.
 
+## Architecture
+
+```mermaid
+graph TD
+    User([Scanner / User]) -->|Uploads WSI & JSON| GCS[Google Cloud Storage]
+    GCS -->|Eventarc Trigger| CF[Cloud Function]
+    CF -->|Submits Job| KFP[Vertex AI Pipeline]
+    
+    subgraph Vertex AI Pipeline
+        KFP_Ext[1. Extract Metadata] -->|MedGemma Prompting| KFP_Proc[2. Process WSI]
+        KFP_Proc -->|Tile Extraction & Embedding| PF[PathFoundation Model]
+        KFP_Proc -->|Mask Generation| MS[MedSigLip Model]
+        KFP_Proc -->|Save Tiles & Masks| GCS_Out[GCS Outputs]
+        KFP_Proc -->|Index Embeddings| VS[Vertex Vector Search]
+        KFP_Proc -->|Log Metadata| BQ[(BigQuery)]
+        KFP_Proc --> KFP_Rep[3. Generate Report]
+        KFP_Rep -->|Uploads Word Doc| GCS_Out
+    end
+```
+
 ## 1. Features
 
 The application provides a modular interface consisting of:
