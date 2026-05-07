@@ -58,16 +58,50 @@ def extract_metadata_and_targets(metadata_gcs_uri: str, medgemma_id: str, projec
 @component(base_image=BASE_IMAGE)
 def process_wsi_and_index(
     wsi_gcs_uri: str, metadata: dict, run_id: str,
-    pf_id: str, ms_id: str, v_end_id: str, v_idx_id: str, bq_table: str, project: str, region: str
+    hf_model_id: str, hf_token_secret: str, ms_id: str, v_end_id: str, v_idx_id: str, bq_table: str, project: str, region: str
 ) -> int:
     import openslide, numpy as np, tifffile, os, base64, io
-    from google.cloud import storage, aiplatform, bigquery
+    from google.cloud import storage, aiplatform, bigquery, secretmanager
+    from huggingface_hub import login
+    import torch
+    import timm
+    from torchvision import transforms
+    from PIL import Image
     
     aiplatform.init(project=project, location=region)
     storage_client = storage.Client(project=project)
     bq_client = bigquery.Client(project=project)
     
-    pf_endpoint = aiplatform.Endpoint(pf_id)
+    # Fetch HF Token from Secret Manager
+    try:
+        sm_client = secretmanager.SecretManagerServiceClient()
+        secret_name = f"projects/{project}/secrets/{hf_token_secret}/versions/latest"
+        hf_token = sm_client.access_secret_version(request={"name": secret_name}).payload.data.decode("UTF-8")
+        login(token=hf_token)
+    except Exception as e:
+        print(f"⚠️ Warning: Failed to fetch HF token {hf_token_secret}: {e}. Proceeding without auth (will fail for gated models).")
+    
+    # Load Model
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Loading {hf_model_id} on {device}...")
+    
+    if "Virchow" in hf_model_id:
+        from timm.layers import SwiGLUPacked
+        model = timm.create_model(f"hf-hub:{hf_model_id}", pretrained=True, mlp_layer=SwiGLUPacked, act_layer=torch.nn.SiLU, dynamic_img_size=False)
+        from timm.data import resolve_data_config
+        from timm.data.transforms_factory import create_transform
+        transform = create_transform(**resolve_data_config(model.pretrained_cfg, model=model))
+    else:
+        # Default / H-optimus-0
+        model = timm.create_model(f"hf-hub:{hf_model_id}", pretrained=True, init_values=1e-5, dynamic_img_size=False)
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.707223, 0.578729, 0.703617), std=(0.211883, 0.230117, 0.177517)),
+        ])
+        
+    model = model.to(device)
+    model.eval()
+    
     ms_endpoint = aiplatform.Endpoint(ms_id)
     v_endpoint = aiplatform.MatchingEngineIndexEndpoint(v_end_id)
     
@@ -86,10 +120,11 @@ def process_wsi_and_index(
     processed_count = 0
     targets = metadata.get("identified_targets", ["Abnormal Tissue"])
     
-    for x in range(0, width, 512):
-        for y in range(0, height, 512):
+    # Extract 224x224 tiles to match native ViT resolution
+    for x in range(0, width, 224):
+        for y in range(0, height, 224):
             try:
-                tile = slide.read_region((x, y), 0, (512, 512)).convert("RGB")
+                tile = slide.read_region((x, y), 0, (224, 224)).convert("RGB")
             except Exception as e:
                 print(f"⚠️ Warning: Failed to read tile at {x},{y}: {e}")
                 continue # Skip corrupted coordinate
@@ -98,16 +133,32 @@ def process_wsi_and_index(
                 tile_id = f"tile_x{x}_y{y}"
                 vector_id = f"vec_{run_id}_{tile_id}"
                 
-                buffered = io.BytesIO()
-                tile.save(buffered, format="PNG")
-                img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
-                
-                # Vision API Error Handling
+                # Embedding extraction via HF Model
                 try:
-                    embedding = pf_endpoint.predict(instances=[{"image_bytes": img_b64}]).predictions[0] 
+                    with torch.inference_mode(), torch.autocast(device_type="cuda" if "cuda" in device else "cpu", dtype=torch.float16):
+                        input_tensor = transform(tile).unsqueeze(0).to(device)
+                        output = model(input_tensor)
+                        
+                        if "Virchow" in hf_model_id:
+                            class_token = output[:, 0]
+                            patch_tokens = output[:, 1:]
+                            embedding_tensor = torch.cat([class_token, patch_tokens.mean(1)], dim=-1)
+                        else:
+                            embedding_tensor = output # H-optimus-0
+                            
+                        embedding = embedding_tensor.cpu().to(torch.float32).numpy().flatten().tolist()
+                except Exception as e:
+                    print(f"⚠️ Warning: Local embedding generation failed on {tile_id}. Error: {e}")
+                    continue
+                
+                # Vision API Segmentation Mask
+                try:
+                    buffered = io.BytesIO()
+                    tile.save(buffered, format="PNG")
+                    img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
                     mask = np.array(ms_endpoint.predict(instances=[{"image_bytes": img_b64, "targets": targets}]).predictions[0], dtype=np.uint8) 
                 except Exception as e:
-                    print(f"⚠️ Warning: Vision AI failed on {tile_id}. Error: {e}. Skipping.")
+                    print(f"⚠️ Warning: MedSigLIP segmentation failed on {tile_id}. Error: {e}. Skipping.")
                     continue
                 
                 # Storage & Database Error Handling

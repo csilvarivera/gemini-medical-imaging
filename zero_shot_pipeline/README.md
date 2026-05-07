@@ -2,7 +2,7 @@
 
 This directory contains the fully codified, automated, and serverless Zero-Shot Whole Slide Image (WSI) Histology Pipeline. 
 
-The pipeline automatically triggers when a pathology Whole Slide Image (`.svs`) and its corresponding metadata (`.json`) are uploaded to Google Cloud Storage. It extracts biological targets using MedGemma, processes and tiles the massive image using PathFoundation and MedSigLip, indexes the embeddings in Vertex AI Vector Search, and generates a pathology report.
+The pipeline automatically triggers when a pathology Whole Slide Image (`.svs`) and its corresponding metadata (`.json`) are uploaded to Google Cloud Storage. It extracts biological targets using MedGemma, processes and tiles the massive image using Open-Source ViT Models (Virchow or H-optimus-0) and MedSigLip, indexes the embeddings in Vertex AI Vector Search, and generates a pathology report.
 
 ---
 
@@ -16,7 +16,7 @@ graph TD
     
     subgraph Vertex AI Pipeline
         KFP_Ext[1. Extract Metadata] -->|MedGemma Prompting| KFP_Proc[2. Process WSI]
-        KFP_Proc -->|Tile Extraction & Embedding| PF[PathFoundation Model]
+        KFP_Proc -->|Tile Extraction & Embedding| PF[HF Model (Virchow/H-optimus-0)]
         KFP_Proc -->|Mask Generation| MS[MedSigLip Model]
         KFP_Proc -->|Save Tiles & Masks| GCS_Out[GCS Outputs]
         KFP_Proc -->|Index Embeddings| VS[Vertex Vector Search]
@@ -138,7 +138,7 @@ gsutil cp sample_123_metadata.json gs://<YOUR_WSI_BUCKET_NAME>/inputs/
 3. You will see a new pipeline run named `auto-wsi-pipeline-<run_id>` executing.
 4. You can click on the pipeline graph to watch the components execute in real-time:
    * **Extract Metadata**: Calls MedGemma to identify targets.
-   * **Process WSI**: Tiles the image, calls PathFoundation and MedSigLip, and indexes to Vector Search.
+   * **Process WSI**: Tiles the image, calls the requested HF Model and MedSigLip, and indexes to Vector Search.
    * **Generate Report**: Creates a `.docx` summary.
 
 ### 4. Verify the Outputs

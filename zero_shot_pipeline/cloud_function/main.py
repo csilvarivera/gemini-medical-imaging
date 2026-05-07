@@ -65,6 +65,16 @@ def trigger_pipeline(cloud_event):
 
     print(f"✅ Both files detected ({wsi_blob.name} & {meta_blob.name}). Launching Pipeline!")
     
+    # Read metadata to check if a specific model was requested
+    import json
+    try:
+        meta_content = meta_blob.download_as_string()
+        meta_dict = json.loads(meta_content)
+        hf_model_id = meta_dict.get("hf_model_id", os.environ.get("HF_MODEL_ID", "bioptimus/H-optimus-0"))
+    except Exception as e:
+        print(f"⚠️ Failed to parse metadata for hf_model_id: {e}")
+        hf_model_id = os.environ.get("HF_MODEL_ID", "bioptimus/H-optimus-0")
+        
     aiplatform.init(project=PROJECT_ID, location=REGION)
     run_id = f"run_{uuid.uuid4().hex[:6]}"
 
@@ -76,12 +86,13 @@ def trigger_pipeline(cloud_event):
             "wsi_uri": f"gs://{bucket_name}/{wsi_blob.name}",
             "metadata_uri": f"gs://{bucket_name}/{meta_blob.name}",
             "run_id": run_id,
-            "output_bucket": BUCKET_NAME
+            "output_bucket": BUCKET_NAME,
+            "hf_model_id": hf_model_id
         }
     )
     
     try:
         pipeline_job.submit()
-        print(f"🚀 Successfully launched pipeline job: auto-wsi-pipeline-{run_id}")
+        print(f"🚀 Successfully launched pipeline job: auto-wsi-pipeline-{run_id} using {hf_model_id}")
     except Exception as e:
         print(f"❌ Failed to submit Vertex AI Pipeline: {e}")

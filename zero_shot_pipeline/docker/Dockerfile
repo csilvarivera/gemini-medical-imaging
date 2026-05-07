@@ -16,4 +16,9 @@ RUN pip install --no-cache-dir \
     python-docx \
     numpy \
     Pillow \
-    kfp
+    kfp \
+    torch \
+    torchvision \
+    timm \
+    huggingface-hub \
+    google-cloud-secret-manager
