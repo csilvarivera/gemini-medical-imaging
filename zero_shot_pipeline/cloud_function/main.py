@@ -25,6 +25,7 @@ BUCKET_NAME = os.environ.get("BUCKET_NAME", f"{PROJECT_ID}-wsi-data")
 
 # Model Endpoints & Secrets
 MEDGEMMA_ID = os.environ.get("MEDGEMMA_ID", "YOUR_MEDGEMMA_ID")
+MEDGEMMA_REGION = os.environ.get("MEDGEMMA_REGION", "us-east1")
 MEDSIGLIP_ID = os.environ.get("MEDSIGLIP_ID", "YOUR_MEDSIGLIP_ID")
 PATHFOUNDATION_ID = os.environ.get("PATHFOUNDATION_ID", "YOUR_PATHFOUNDATION_ID")
 HF_TOKEN_SECRET = os.environ.get("HF_TOKEN_SECRET", "huggingface-token")
@@ -148,7 +149,7 @@ def run_extract_metadata_and_targets(meta_blob) -> dict:
     
     # 4. Safely Call MedGemma
     try:
-        endpoint = aiplatform.Endpoint(MEDGEMMA_ID)
+        endpoint = aiplatform.Endpoint(endpoint_name=MEDGEMMA_ID, location=MEDGEMMA_REGION)
         response = endpoint.predict(instances=[{"prompt": prompt}])
         targets = [t.strip() for t in response.predictions[0].split(',')]
     except Exception as e:
