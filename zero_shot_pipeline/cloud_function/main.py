@@ -3,7 +3,7 @@ import os
 import uuid
 import json
 import re
-import openslide
+# Removed openslide to avoid C dependencies on standard GCF
 import numpy as np
 import tifffile
 import io
@@ -214,22 +214,31 @@ def run_process_wsi_and_index(wsi_gcs_uri: str, metadata: dict, run_id: str, buc
     # Safely download massive WSI
     try:
         storage_client.bucket(wsi_bucket).blob("/".join(wsi_gcs_uri.split("/")[3:])).download_to_filename(local_wsi_path)
-        slide = openslide.OpenSlide(local_wsi_path)
     except Exception as e:
-        raise RuntimeError(f"❌ CRITICAL ERROR: Failed to download or open WSI file: {e}")
+        raise RuntimeError(f"❌ CRITICAL ERROR: Failed to download WSI file: {e}")
         
-    width, height = slide.dimensions
     processed_count = 0
     targets = metadata.get("identified_targets", ["Abnormal Tissue"])
     
-    # Extract 224x224 tiles to match native ViT resolution
-    for x in range(0, width, 224):
-        for y in range(0, height, 224):
-            try:
-                tile = slide.read_region((x, y), 0, (224, 224)).convert("RGB")
-            except Exception as e:
-                print(f"⚠️ Warning: Failed to read tile at {x},{y}: {e}")
-                continue # Skip corrupted coordinate
+    # Open slide natively in pure Python using tifffile (avoiding libopenslide C dependencies)
+    try:
+        tif = tifffile.TiffFile(local_wsi_path)
+        page = tif.pages[0]
+        height, width = page.shape[:2]
+    except Exception as e:
+        raise RuntimeError(f"❌ CRITICAL ERROR: Failed to parse WSI file using tifffile: {e}")
+        
+    try:
+        # Extract 224x224 tiles to match native ViT resolution
+        for x in range(0, width, 224):
+            for y in range(0, height, 224):
+                try:
+                    # Extract the pixel window natively from the tiled TIFF page
+                    tile_np = page.asarray(window=((y, y+224), (x, x+224)))
+                    tile = Image.fromarray(tile_np).convert("RGB")
+                except Exception as e:
+                    print(f"⚠️ Warning: Failed to read tile at {x},{y}: {e}")
+                    continue # Skip corrupted coordinate
             
             if tile.getextrema()[0][0] < 240: # Skip blank glass
                 tile_id = f"tile_x{x}_y{y}"
@@ -303,6 +312,9 @@ def run_process_wsi_and_index(wsi_gcs_uri: str, metadata: dict, run_id: str, buc
                     print(f"⚠️ Warning: Database/Storage operation failed on {tile_id}: {e}")
                     continue
                     
+    finally:
+        tif.close()
+        
     return processed_count
 
 
