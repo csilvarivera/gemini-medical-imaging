@@ -161,10 +161,12 @@ def run_extract_metadata_and_targets(meta_blob) -> dict:
 
 
 def run_process_wsi_and_index(wsi_gcs_uri: str, metadata: dict, run_id: str, bucket_name: str) -> int:
+    print(f"🚩 [CHECKPOINT] Starting run_process_wsi_and_index for WSI: {wsi_gcs_uri}")
     storage_client = storage.Client(project=PROJECT_ID)
     bq_client = bigquery.Client(project=PROJECT_ID)
     
     # Initialize Vertex Endpoints
+    print("🚩 [CHECKPOINT] Connecting to MedSigLIP and MatchingEngine endpoints...")
     ms_endpoint = aiplatform.Endpoint(MEDSIGLIP_ID)
     v_endpoint = aiplatform.MatchingEngineIndexEndpoint(VECTOR_INDEX_ENDPOINT_ID)
     
@@ -180,6 +182,7 @@ def run_process_wsi_and_index(wsi_gcs_uri: str, metadata: dict, run_id: str, buc
         
         # Fetch HF Token from Secret Manager
         try:
+            print(f"🚩 [CHECKPOINT] Fetching HF Secret Token: {HF_TOKEN_SECRET}...")
             sm_client = secretmanager.SecretManagerServiceClient()
             secret_name = f"projects/{PROJECT_ID}/secrets/{HF_TOKEN_SECRET}/versions/latest"
             hf_token = sm_client.access_secret_version(request={"name": secret_name}).payload.data.decode("UTF-8")
@@ -189,7 +192,7 @@ def run_process_wsi_and_index(wsi_gcs_uri: str, metadata: dict, run_id: str, buc
         
         # Load Model (CPU optimized since Cloud Functions don't run with GPU)
         device = "cpu"
-        print(f"Loading {hf_model_id} on {device}...")
+        print(f"🚩 [CHECKPOINT] Loading Timm model '{hf_model_id}' on {device}...")
         
         if "Virchow" in hf_model_id:
             from timm.layers import SwiGLUPacked
@@ -207,29 +210,33 @@ def run_process_wsi_and_index(wsi_gcs_uri: str, metadata: dict, run_id: str, buc
             
         model = model.to(device)
         model.eval()
+        print("🚩 [CHECKPOINT] Local model loaded and set to eval successfully.")
     
     wsi_bucket = wsi_gcs_uri.split("/")[2]
+    wsi_blob_name = "/".join(wsi_gcs_uri.split("/")[3:])
     wsi_filename = wsi_gcs_uri.split("/")[-1]
-    local_wsi_path = f"/tmp/{wsi_filename}"
     
-    # Safely download massive WSI
-    try:
-        storage_client.bucket(wsi_bucket).blob("/".join(wsi_gcs_uri.split("/")[3:])).download_to_filename(local_wsi_path)
-    except Exception as e:
-        raise RuntimeError(f"❌ CRITICAL ERROR: Failed to download WSI file: {e}")
-        
     processed_count = 0
     targets = metadata.get("identified_targets", ["Abnormal Tissue"])
     
-    # Open slide natively in pure Python using tifffile (avoiding libopenslide C dependencies)
+    # Open slide directly from GCS stream in pure Python using tifffile (no /tmp download needed!)
     try:
-        tif = tifffile.TiffFile(local_wsi_path)
+        print(f"🚩 [CHECKPOINT] Opening binary stream for gs://{wsi_bucket}/{wsi_blob_name} directly from GCS...")
+        bucket = storage_client.bucket(wsi_bucket)
+        blob = bucket.blob(wsi_blob_name)
+        
+        # Open blob as seekable binary network stream
+        gcs_file = blob.open("rb")
+        print("🚩 [CHECKPOINT] Stream initialized. Parsing TIFF structures...")
+        tif = tifffile.TiffFile(gcs_file)
         page = tif.pages[0]
         height, width = page.shape[:2]
+        print(f"🚩 [CHECKPOINT] slide successfully parsed. Shape dimensions: {width}x{height}")
     except Exception as e:
-        raise RuntimeError(f"❌ CRITICAL ERROR: Failed to parse WSI file using tifffile: {e}")
+        raise RuntimeError(f"❌ CRITICAL ERROR: Failed to stream and parse WSI file from GCS: {e}")
         
     try:
+        print("🚩 [CHECKPOINT] Slicing slide into tiles and starting extraction loop...")
         # Extract 224x224 tiles to match native ViT resolution
         for x in range(0, width, 224):
             for y in range(0, height, 224):
@@ -244,6 +251,7 @@ def run_process_wsi_and_index(wsi_gcs_uri: str, metadata: dict, run_id: str, buc
             if tile.getextrema()[0][0] < 240: # Skip blank glass
                 tile_id = f"tile_x{x}_y{y}"
                 vector_id = f"vec_{run_id}_{tile_id}"
+                print(f"🚩 [CHECKPOINT TILE] Sliced tile '{tile_id}' at x={x}, y={y}. Processing...")
                 
                 buffered = io.BytesIO()
                 tile.save(buffered, format="PNG")
@@ -252,6 +260,7 @@ def run_process_wsi_and_index(wsi_gcs_uri: str, metadata: dict, run_id: str, buc
                 # Embedding extraction
                 if use_vertex_pf:
                     try:
+                        print(f"🚩 [CHECKPOINT TILE] Calling Model Garden Endpoint for tile {tile_id} embeddings...")
                         response = pf_endpoint.predict(instances=[{"image_bytes": img_b64}])
                         embedding = response.predictions[0]
                     except Exception as e:
@@ -260,6 +269,7 @@ def run_process_wsi_and_index(wsi_gcs_uri: str, metadata: dict, run_id: str, buc
                 else:
                     # Embedding extraction via local HF Model
                     try:
+                        print(f"🚩 [CHECKPOINT TILE] Extracting local PyTorch embeddings for tile {tile_id}...")
                         with torch.inference_mode():
                             input_tensor = transform(tile).unsqueeze(0).to(device)
                             output = model(input_tensor)
@@ -278,6 +288,7 @@ def run_process_wsi_and_index(wsi_gcs_uri: str, metadata: dict, run_id: str, buc
                 
                 # Vision API Segmentation Mask
                 try:
+                    print(f"🚩 [CHECKPOINT TILE] Calling MedSigLIP endpoint to generate mask for tile {tile_id}...")
                     mask = np.array(ms_endpoint.predict(instances=[{"image_bytes": img_b64, "targets": targets}]).predictions[0], dtype=np.uint8) 
                 except Exception as e:
                     print(f"⚠️ Warning: MedSigLIP segmentation failed on {tile_id}. Error: {e}. Skipping.")
@@ -285,6 +296,7 @@ def run_process_wsi_and_index(wsi_gcs_uri: str, metadata: dict, run_id: str, buc
                 
                 # Storage & Database Error Handling
                 try:
+                    print(f"🚩 [CHECKPOINT TILE] Saving mask, upserting vector index, and logging to BigQuery for {tile_id}...")
                     local_mask = f"/tmp/{tile_id}_mask.tif"
                     tifffile.imwrite(local_mask, mask, photometric='minisblack')
                     mask_uri = f"gs://{wsi_bucket}/outputs/{run_id}/masks/{tile_id}_mask.tif"
@@ -308,13 +320,17 @@ def run_process_wsi_and_index(wsi_gcs_uri: str, metadata: dict, run_id: str, buc
                     bq_client.insert_rows_json(BQ_TABLE, rows)
                     
                     processed_count += 1
-                    if processed_count >= 20: return processed_count # Cap for POC speed
+                    if processed_count >= 20: 
+                        print("🚩 [CHECKPOINT] Tile processed count capped at 20. Finalizing run...")
+                        return processed_count # Cap for POC speed
                 except Exception as e:
                     print(f"⚠️ Warning: Database/Storage operation failed on {tile_id}: {e}")
                     continue
                     
     finally:
+        print("🚩 [CHECKPOINT] Releasing file resources and closing network streams...")
         tif.close()
+        gcs_file.close()
         
     return processed_count
 
