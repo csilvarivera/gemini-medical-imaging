@@ -32,13 +32,19 @@ resource "google_cloudfunctions2_function" "trigger_wsi_pipeline" {
 
   service_config {
     max_instance_count = 1
-    available_memory   = "256M"
-    timeout_seconds    = 60
+    available_memory   = "16Gi"
+    cpu                = "4"
+    timeout_seconds    = 1800
     service_account_email = google_service_account.pipeline_sa.email
     environment_variables = {
-      PROJECT_ID  = var.project_id
-      REGION      = var.region
-      BUCKET_NAME = google_storage_bucket.wsi_data_bucket.name
+      PROJECT_ID               = var.project_id
+      REGION                   = var.region
+      BUCKET_NAME              = google_storage_bucket.wsi_data_bucket.name
+      MEDGEMMA_ID              = var.medgemma_id
+      MEDSIGLIP_ID             = var.medsiglip_id
+      VECTOR_INDEX_ENDPOINT_ID = google_vertex_ai_index_endpoint.histology_vector_endpoint.id
+      VECTOR_INDEX_ID          = google_vertex_ai_index.histology_index.id
+      HF_TOKEN_SECRET          = "huggingface-token"
     }
   }
 
