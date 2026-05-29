@@ -3,6 +3,7 @@ FROM python:3.10-slim
 # Install system dependencies for OpenSlide and other image processing
 RUN apt-get update && apt-get install -y \
     openslide-tools \
+    libopenslide0 \
     libgl1-mesa-glx \
     && rm -rf /var/lib/apt/lists/*
 
