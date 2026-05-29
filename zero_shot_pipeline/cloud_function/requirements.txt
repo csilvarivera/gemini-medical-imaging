@@ -11,3 +11,4 @@ torch==2.2.1
 torchvision==0.17.1
 timm==0.9.16
 huggingface-hub==0.21.4
+imagecodecs==2024.1.1
