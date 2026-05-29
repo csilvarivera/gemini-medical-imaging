@@ -12,24 +12,23 @@ The pipeline automatically triggers when a pathology Whole Slide Image (`.svs`) 
 graph TD
     User([Scanner / User]) -->|Uploads WSI & JSON| GCS[Google Cloud Storage]
     GCS -->|Eventarc Trigger| CF[Cloud Function]
-    CF -->|Submits Job| KFP[Vertex AI Pipeline]
     
-    subgraph Vertex AI Pipeline
-        KFP_Ext[1. Extract Metadata] -->|MedGemma Prompting| KFP_Proc[2. Process WSI]
-        KFP_Proc -->|Tile Extraction & Embedding| PF[HF Model (Virchow/H-optimus-0)]
-        KFP_Proc -->|Mask Generation| MS[MedSigLip Model]
-        KFP_Proc -->|Save Tiles & Masks| GCS_Out[GCS Outputs]
-        KFP_Proc -->|Index Embeddings| VS[Vertex Vector Search]
-        KFP_Proc -->|Log Metadata| BQ[(BigQuery)]
-        KFP_Proc --> KFP_Rep[3. Generate Report]
-        KFP_Rep -->|Uploads Word Doc| GCS_Out
+    subgraph Cloud Function (Local Execution)
+        CF -->|1. Extract Metadata| MedGemma[MedGemma Endpoint]
+        CF -->|2. Process WSI| LocalVit[HF Model (Virchow/H-optimus-0)]
+        CF -->|Vision Segment Mask| MedSigLip[MedSigLip Endpoint]
+        CF -->|Save Tiles & Masks| GCS_Out[GCS Outputs]
+        CF -->|Index Embeddings| VS[Vertex Vector Search]
+        CF -->|Log Metadata| BQ[(BigQuery)]
+        CF -->|3. Generate Report| Report[docx summary report]
+        Report -->|Uploads Word Doc| GCS_Out
     end
 ```
 
 1. **`terraform/`**: Infrastructure-as-Code to provision GCS buckets, BigQuery tables, Vertex AI Vector Search endpoints, Service Accounts, and Eventarc triggers.
-2. **`docker/`**: A custom Kubeflow (KFP) container environment that pre-installs complex C-libraries like `openslide-tools` alongside Python dependencies.
-3. **`pipeline/`**: Modularized Vertex AI Pipeline components (`components.py`) and a compilation script (`compile_pipeline.py`) that generates the execution graph.
-4. **`cloud_function/`**: An event-driven Cloud Function that intercepts GCS uploads, deduplicates them, waits for both the image and metadata files to be present, and dynamically submits the pipeline job to Vertex AI.
+2. **`docker/`**: Contains standard environment specs for image processing tools.
+3. **`pipeline/`**: Legacy Vertex AI Pipeline components (`components.py`) and compilation script (`compile_pipeline.py`).
+4. **`cloud_function/`**: An event-driven, serverless Cloud Function that intercepts GCS uploads, waits for matching paired inputs, executes pathology models locally on CPU, communicates with Vertex endpoints, indexes tiles, logs to BigQuery, and outputs final summary reports.
 
 ---
 
@@ -40,7 +39,6 @@ Follow these steps in order to deploy the pipeline from scratch.
 ### Prerequisites
 * You must have the `gcloud` CLI installed and authenticated.
 * You must have `terraform` installed.
-* You must have Docker installed.
 * Ensure you are operating within your target GCP Project (e.g. `<YOUR_PROJECT_ID>`).
 
 ### Step 1: Deploy Infrastructure (Terraform)
@@ -61,40 +59,8 @@ terraform apply
 
 > **Note:** Vertex AI Vector Search Endpoints can take up to 30-45 minutes to provision entirely. Please be patient during the `terraform apply` step.
 
-### Step 2: Build & Push the Pipeline Container
-Kubeflow requires a base image to execute the Python components. We use Artifact Registry to host this image.
-
-```bash
-cd ../docker
-
-# Replace with your actual Artifact Registry path!
-export IMAGE_URI="us-central1-docker.pkg.dev/<YOUR_PROJECT_ID>/<YOUR_REPO>/kfp-base:latest"
-
-# Build the image locally
-docker build -t $IMAGE_URI .
-
-# Push the image to Google Cloud
-docker push $IMAGE_URI
-```
-
-> **Critical:** After pushing, you **must** update the `BASE_IMAGE` variable at the top of `pipeline/components.py` with your exact `$IMAGE_URI`.
-
-### Step 3: Compile the Vertex AI Pipeline
-This step converts your Python component code into a JSON execution graph and uploads it to GCS so the Cloud Function can trigger it later.
-
-```bash
-cd ../pipeline
-
-# Install compilation requirements
-pip install -r requirements.txt
-
-# Compile the pipeline and upload to GCS templates/ directory
-python compile_pipeline.py
-```
-*You should see a success message indicating `wsi_pipeline.json` was uploaded.*
-
-### Step 4: Deploy the Automation Trigger (Cloud Function)
-The Terraform in Step 1 handles the Eventarc setup, but you might prefer or need to deploy the Cloud Function source directly via `gcloud` if you make rapid iterations to the trigger logic.
+### Step 2: Deploy the Automation Trigger (Cloud Function)
+Because the Cloud Function runs the PyTorch embedding extraction, image tiling, and report generation directly within its own execution context, it must be allocated sufficient memory and execution time. We configure the function with **16GB RAM, 4 CPUs, and a 30-minute timeout**.
 
 ```bash
 cd ../cloud_function
@@ -107,8 +73,13 @@ gcloud functions deploy trigger-wsi-pipeline \
     --entry-point=trigger_pipeline \
     --trigger-event-filters="type=google.cloud.storage.object.v1.finalized" \
     --trigger-event-filters="bucket=<YOUR_WSI_BUCKET_NAME>" \
-    --service-account="<YOUR_SERVICE_ACCOUNT_EMAIL>"
+    --service-account="<YOUR_SERVICE_ACCOUNT_EMAIL>" \
+    --memory=16Gi \
+    --cpu=4 \
+    --timeout=1800s \
+    --set-env-vars="PROJECT_ID=<YOUR_PROJECT_ID>,REGION=us-central1,BUCKET_NAME=<YOUR_WSI_BUCKET_NAME>,MEDGEMMA_ID=<YOUR_MEDGEMMA_ID>,MEDSIGLIP_ID=<YOUR_MEDSIGLIP_ID>,VECTOR_INDEX_ENDPOINT_ID=<YOUR_VECTOR_ENDPOINT_ID>,VECTOR_INDEX_ID=<YOUR_VECTOR_INDEX_ID>,HF_TOKEN_SECRET=huggingface-token"
 ```
+
 
 ---
 
