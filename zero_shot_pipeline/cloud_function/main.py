@@ -26,6 +26,7 @@ BUCKET_NAME = os.environ.get("BUCKET_NAME", f"{PROJECT_ID}-wsi-data")
 # Model Endpoints & Secrets
 MEDGEMMA_ID = os.environ.get("MEDGEMMA_ID", "YOUR_MEDGEMMA_ID")
 MEDSIGLIP_ID = os.environ.get("MEDSIGLIP_ID", "YOUR_MEDSIGLIP_ID")
+PATHFOUNDATION_ID = os.environ.get("PATHFOUNDATION_ID", "YOUR_PATHFOUNDATION_ID")
 HF_TOKEN_SECRET = os.environ.get("HF_TOKEN_SECRET", "huggingface-token")
 
 # Vector Search & Database
@@ -162,40 +163,49 @@ def run_process_wsi_and_index(wsi_gcs_uri: str, metadata: dict, run_id: str, buc
     storage_client = storage.Client(project=PROJECT_ID)
     bq_client = bigquery.Client(project=PROJECT_ID)
     
-    hf_model_id = metadata.get("hf_model_id", os.environ.get("HF_MODEL_ID", "bioptimus/H-optimus-0"))
-    
-    # Fetch HF Token from Secret Manager
-    try:
-        sm_client = secretmanager.SecretManagerServiceClient()
-        secret_name = f"projects/{PROJECT_ID}/secrets/{HF_TOKEN_SECRET}/versions/latest"
-        hf_token = sm_client.access_secret_version(request={"name": secret_name}).payload.data.decode("UTF-8")
-        login(token=hf_token)
-    except Exception as e:
-        print(f"⚠️ Warning: Failed to fetch HF token {HF_TOKEN_SECRET}: {e}. Proceeding without auth (will fail for gated models).")
-    
-    # Load Model (CPU optimized since Cloud Functions don't run with GPU)
-    device = "cpu"
-    print(f"Loading {hf_model_id} on {device}...")
-    
-    if "Virchow" in hf_model_id:
-        from timm.layers import SwiGLUPacked
-        model = timm.create_model(f"hf-hub:{hf_model_id}", pretrained=True, mlp_layer=SwiGLUPacked, act_layer=torch.nn.SiLU, dynamic_img_size=False)
-        from timm.data import resolve_data_config
-        from timm.data.transforms_factory import create_transform
-        transform = create_transform(**resolve_data_config(model.pretrained_cfg, model=model))
-    else:
-        # Default / H-optimus-0
-        model = timm.create_model(f"hf-hub:{hf_model_id}", pretrained=True, init_values=1e-5, dynamic_img_size=False)
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=(0.707223, 0.578729, 0.703617), std=(0.211883, 0.230117, 0.177517)),
-        ])
-        
-    model = model.to(device)
-    model.eval()
-    
+    # Initialize Vertex Endpoints
     ms_endpoint = aiplatform.Endpoint(MEDSIGLIP_ID)
     v_endpoint = aiplatform.MatchingEngineIndexEndpoint(VECTOR_INDEX_ENDPOINT_ID)
+    
+    # Check if visual embedding model is running via Vertex AI Model Garden endpoint
+    use_vertex_pf = bool(PATHFOUNDATION_ID and PATHFOUNDATION_ID != "" and not PATHFOUNDATION_ID.startswith("YOUR_"))
+    
+    if use_vertex_pf:
+        print(f"🚀 Running Path Foundation visual embeddings via Vertex AI Model Garden endpoint: {PATHFOUNDATION_ID}")
+        pf_endpoint = aiplatform.Endpoint(PATHFOUNDATION_ID)
+    else:
+        print("🧠 PATHFOUNDATION_ID not set or invalid. Falling back to local HuggingFace PyTorch model on CPU...")
+        hf_model_id = metadata.get("hf_model_id", os.environ.get("HF_MODEL_ID", "bioptimus/H-optimus-0"))
+        
+        # Fetch HF Token from Secret Manager
+        try:
+            sm_client = secretmanager.SecretManagerServiceClient()
+            secret_name = f"projects/{PROJECT_ID}/secrets/{HF_TOKEN_SECRET}/versions/latest"
+            hf_token = sm_client.access_secret_version(request={"name": secret_name}).payload.data.decode("UTF-8")
+            login(token=hf_token)
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to fetch HF token {HF_TOKEN_SECRET}: {e}. Proceeding without auth (will fail for gated models).")
+        
+        # Load Model (CPU optimized since Cloud Functions don't run with GPU)
+        device = "cpu"
+        print(f"Loading {hf_model_id} on {device}...")
+        
+        if "Virchow" in hf_model_id:
+            from timm.layers import SwiGLUPacked
+            model = timm.create_model(f"hf-hub:{hf_model_id}", pretrained=True, mlp_layer=SwiGLUPacked, act_layer=torch.nn.SiLU, dynamic_img_size=False)
+            from timm.data import resolve_data_config
+            from timm.data.transforms_factory import create_transform
+            transform = create_transform(**resolve_data_config(model.pretrained_cfg, model=model))
+        else:
+            # Default / H-optimus-0
+            model = timm.create_model(f"hf-hub:{hf_model_id}", pretrained=True, init_values=1e-5, dynamic_img_size=False)
+            transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(mean=(0.707223, 0.578729, 0.703617), std=(0.211883, 0.230117, 0.177517)),
+            ])
+            
+        model = model.to(device)
+        model.eval()
     
     wsi_bucket = wsi_gcs_uri.split("/")[2]
     wsi_filename = wsi_gcs_uri.split("/")[-1]
@@ -225,29 +235,39 @@ def run_process_wsi_and_index(wsi_gcs_uri: str, metadata: dict, run_id: str, buc
                 tile_id = f"tile_x{x}_y{y}"
                 vector_id = f"vec_{run_id}_{tile_id}"
                 
-                # Embedding extraction via HF Model
-                try:
-                    with torch.inference_mode():
-                        input_tensor = transform(tile).unsqueeze(0).to(device)
-                        output = model(input_tensor)
-                        
-                        if "Virchow" in hf_model_id:
-                            class_token = output[:, 0]
-                            patch_tokens = output[:, 1:]
-                            embedding_tensor = torch.cat([class_token, patch_tokens.mean(1)], dim=-1)
-                        else:
-                            embedding_tensor = output # H-optimus-0
+                buffered = io.BytesIO()
+                tile.save(buffered, format="PNG")
+                img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+                
+                # Embedding extraction
+                if use_vertex_pf:
+                    try:
+                        response = pf_endpoint.predict(instances=[{"image_bytes": img_b64}])
+                        embedding = response.predictions[0]
+                    except Exception as e:
+                        print(f"⚠️ Warning: Model Garden Endpoint embedding failed on {tile_id}. Error: {e}")
+                        continue
+                else:
+                    # Embedding extraction via local HF Model
+                    try:
+                        with torch.inference_mode():
+                            input_tensor = transform(tile).unsqueeze(0).to(device)
+                            output = model(input_tensor)
                             
-                        embedding = embedding_tensor.cpu().to(torch.float32).numpy().flatten().tolist()
-                except Exception as e:
-                    print(f"⚠️ Warning: Local embedding generation failed on {tile_id}. Error: {e}")
-                    continue
+                            if "Virchow" in hf_model_id:
+                                class_token = output[:, 0]
+                                patch_tokens = output[:, 1:]
+                                embedding_tensor = torch.cat([class_token, patch_tokens.mean(1)], dim=-1)
+                            else:
+                                embedding_tensor = output # H-optimus-0
+                                
+                            embedding = embedding_tensor.cpu().to(torch.float32).numpy().flatten().tolist()
+                    except Exception as e:
+                        print(f"⚠️ Warning: Local embedding generation failed on {tile_id}. Error: {e}")
+                        continue
                 
                 # Vision API Segmentation Mask
                 try:
-                    buffered = io.BytesIO()
-                    tile.save(buffered, format="PNG")
-                    img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
                     mask = np.array(ms_endpoint.predict(instances=[{"image_bytes": img_b64, "targets": targets}]).predictions[0], dtype=np.uint8) 
                 except Exception as e:
                     print(f"⚠️ Warning: MedSigLIP segmentation failed on {tile_id}. Error: {e}. Skipping.")
